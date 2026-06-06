@@ -17,7 +17,7 @@ This directory contains architecture and system documentation generated from the
    - End-to-end CLI, construction, planning, tool-calling, search, memory/report, and retry workflows.
 
 5. [Data Model](05-data-model.md)
-   - `memory.json`, `report.md`, tool result schemas, and absence of databases/vector stores.
+   - Latest-run files, `runs/goal_history.jsonl`, per-run archives, per-run artifacts, tool result schemas, and absence of databases/vector stores.
 
 6. [API Reference](06-api-reference.md)
    - Internal Python APIs, tool APIs, Gemini API usage, and search integrations.

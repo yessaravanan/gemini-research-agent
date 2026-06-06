@@ -4,24 +4,34 @@
 
 The project has no relational database, no migrations, no ORM models, no vector store, and no external state service. Persistent data is stored in local files:
 
-- `memory.json`: structured JSON run state.
-- `report.md`: generated Markdown report.
+- `runs/latest/memory.json`: structured JSON run state.
+- `runs/latest/report.md`: generated Markdown report.
+- `runs/goal_history.jsonl`: append-only run start/completion event index.
+- `runs/<run_id>/memory.json` and `runs/<run_id>/report.md`: per-run archive files.
+- `runs/<run_id>/artifacts/`: per-run files created through the model-visible `write_file` tool.
 
 Evidence:
 
-- Memory path and report path are constructor defaults ([agent.py](../agent.py#L141-L147)).
-- Memory is written with `Path.write_text()` ([agent.py](../agent.py#L576-L581)).
-- Report is rendered from finalized in-memory state and written directly to `report.md` ([agent.py](../agent.py#L226-L234)).
+- Memory path and report path are constructor defaults ([agent.py](../gemini_research_agent/agent.py#L141-L147)).
+- Memory is written with `Path.write_text()` ([agent.py](../gemini_research_agent/agent.py#L576-L581)).
+- Report is rendered from finalized in-memory state and written directly to `runs/latest/report.md` ([agent.py](../gemini_research_agent/agent.py#L226-L234)).
 
-## `memory.json` Schema
+## `runs/latest/memory.json` Schema
 
 The schema is implicit in `Agent.__init__()` and evolves during execution.
 
 ```json
 {
+  "run_id": "string timestamp identifier",
   "goal": "string",
   "started_at": "string ISO-8601 UTC timestamp",
   "completed_at": "string ISO-8601 UTC timestamp or empty string",
+  "history_paths": {
+    "memory": "string path",
+    "report": "string path",
+    "artifacts": "string path",
+    "goal_history": "string path"
+  },
   "providers": [
     {
       "name": "string",
@@ -59,6 +69,7 @@ The schema is implicit in `Agent.__init__()` and evolves during execution.
     {
       "tool": "string",
       "arguments": "object",
+      "effective_arguments": "object, present when arguments were rewritten",
       "result": "object or scalar",
       "timestamp": "string ISO-8601 UTC timestamp"
     }
@@ -70,11 +81,11 @@ The schema is implicit in `Agent.__init__()` and evolves during execution.
 
 Evidence:
 
-- Initial keys: [agent.py](../agent.py#L148-L158)
-- Provider records: [agent.py](../agent.py#L167-L169)
-- Tool call records: [agent.py](../agent.py#L485-L491)
-- Rate-limit records: [agent.py](../agent.py#L603-L612)
-- Timestamp generation: [agent.py](../agent.py#L695-L698)
+- Initial keys: [agent.py](../gemini_research_agent/agent.py#L148-L158)
+- Provider records: [agent.py](../gemini_research_agent/agent.py#L167-L169)
+- Tool call records: [agent.py](../gemini_research_agent/agent.py#L485-L491)
+- Rate-limit records: [agent.py](../gemini_research_agent/agent.py#L603-L612)
+- Timestamp generation: [agent.py](../gemini_research_agent/agent.py#L695-L698)
 
 ## Relationships
 
@@ -139,9 +150,9 @@ erDiagram
 
 This ER diagram models JSON document structure, not database tables.
 
-## `report.md` Structure
+## `runs/latest/report.md` Structure
 
-`report.md` is generated from `_format_report_from_memory()` and contains these sections:
+`runs/latest/report.md` is generated from `_format_report_from_memory()` and contains these sections:
 
 1. `# Agent Report`
 2. `## Goal`
@@ -149,10 +160,11 @@ This ER diagram models JSON document structure, not database tables.
 4. `## Plan`
 5. `## Reasoning Steps`
 6. `## Rate Limit Failures`
-7. `## Step Results`
-8. `## Final Answer`
+7. `## Tool-Calling Failures`
+8. `## Step Results`
+9. `## Final Answer`
 
-Evidence: [agent.py](../agent.py#L520-L568).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L520-L568).
 
 ## Tool Result Schemas
 
@@ -165,18 +177,20 @@ Evidence: [agent.py](../agent.py#L520-L568).
 }
 ```
 
-Evidence: [tools/file_tools.py](../tools/file_tools.py#L19-L22).
+Evidence: [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L19-L22).
 
 ### `write_file`
 
 ```json
 {
-  "path": "string",
+  "path": "string actual scoped path",
   "status": "written"
 }
 ```
 
-Evidence: [tools/file_tools.py](../tools/file_tools.py#L25-L30).
+Evidence: [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L25-L30).
+
+When `write_file` is invoked by the model, the original requested filename is stored in `tool_calls[].arguments.path`. The agent rewrites the actual file path under `runs/<run_id>/artifacts/` and stores that scoped path in `tool_calls[].effective_arguments.path` and `tool_calls[].result.path` ([agent.py](../gemini_research_agent/agent.py)).
 
 ### `list_files`
 
@@ -187,7 +201,7 @@ Evidence: [tools/file_tools.py](../tools/file_tools.py#L25-L30).
 }
 ```
 
-Evidence: [tools/file_tools.py](../tools/file_tools.py#L33-L48).
+Evidence: [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L33-L48).
 
 ### `web_search`
 
@@ -196,7 +210,7 @@ Success:
 ```json
 {
   "query": "string",
-  "provider": "duckduckgo or brave",
+  "provider": "tavily or brave",
   "results": [
     {
       "title": "string",
@@ -212,13 +226,13 @@ Failure or no parsed results:
 ```json
 {
   "query": "string",
-  "provider": "duckduckgo,brave",
+  "provider": "tavily,brave",
   "results": [],
   "error": "string"
 }
 ```
 
-Evidence: [tools/web_search.py](../tools/web_search.py#L29-L58), [tools/web_search.py](../tools/web_search.py#L93-L204).
+Evidence: [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L29-L58), [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L93-L204).
 
 ## Vector Stores
 
@@ -226,6 +240,8 @@ No vector store, embedding model, semantic index, or retrieval database is prese
 
 ## Memory Store
 
-The memory store is `memory.json`, overwritten on each `_save_memory()` call. It is not append-only and has no locking, versioning, or schema validation.
+`runs/latest/memory.json` is the latest-run memory file and is overwritten on each `_save_memory()` call. Each run is also archived to `runs/<run_id>/memory.json`, the matching report is archived to `runs/<run_id>/report.md`, and model-created files are written under `runs/<run_id>/artifacts/`.
 
-Evidence: [agent.py](../agent.py#L576-L581).
+`runs/goal_history.jsonl` is append-only. The agent writes a `started` event when a goal begins and a `completed` event after the final report is written. This creates a durable index of every user goal even though `runs/latest/memory.json` and `runs/latest/report.md` remain latest-run convenience files.
+
+Evidence: [agent.py](../gemini_research_agent/agent.py#L576-L581).

@@ -5,7 +5,7 @@ The agent:
 2. Creates a step-by-step plan with a configured model provider.
 3. Searches the web with a local tool.
 4. Executes plan steps with native Gemini function calling.
-5. Saves progress to memory.json and the final answer to report.md.
+5. Saves latest progress and reports under runs/latest/.
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from tools import list_files, read_file, web_search, write_file
+from .tools import list_files, read_file, web_search, write_file
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Load local development secrets from the project .env file. Real environment
 # variables still win, because python-dotenv does not override them by default.
@@ -46,15 +46,25 @@ class Agent:
 
     def __init__(
         self,
-        memory_path: str = "memory.json",
-        report_path: str = "report.md",
+        memory_path: str = "runs/latest/memory.json",
+        report_path: str = "runs/latest/report.md",
     ) -> None:
         self.memory_path = Path(memory_path)
         self.report_path = Path(report_path)
+        self.goal_history_path = Path(
+            os.getenv("GOAL_HISTORY_PATH", "runs/goal_history.jsonl")
+        )
+        self.run_history_dir = Path(os.getenv("RUN_HISTORY_DIR", "runs"))
+        self.run_id = ""
+        self.run_memory_path: Path | None = None
+        self.run_report_path: Path | None = None
+        self.run_artifacts_path: Path | None = None
         self.memory: dict[str, Any] = {
+            "run_id": "",
             "goal": "",
             "started_at": "",
             "completed_at": "",
+            "history_paths": {},
             "providers": [],
             "plan": [],
             "reasoning_steps": [],
@@ -124,7 +134,7 @@ class Agent:
                     types.FunctionDeclaration(
                         name="write_file",
                         description=(
-                            "Write UTF-8 text to a file inside the project workspace."
+                            "Write UTF-8 text to the current run's artifacts directory."
                         ),
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
@@ -198,6 +208,8 @@ class Agent:
         """Run the full agent workflow for a user goal."""
         self.memory["goal"] = goal
         self.memory["started_at"] = self._now()
+        self._prepare_run_history()
+        self._append_goal_history_event("started")
         self._remember_reasoning("Captured the user goal and started planning.")
         self._save_memory()
 
@@ -236,6 +248,10 @@ class Agent:
         # the completed memory state for this run.
         report_markdown = self._format_report_from_memory()
         self.report_path.write_text(report_markdown, encoding="utf-8")
+        if self.run_report_path is not None:
+            self.run_report_path.parent.mkdir(parents=True, exist_ok=True)
+            self.run_report_path.write_text(report_markdown, encoding="utf-8")
+        self._append_goal_history_event("completed")
 
         return final_answer
 
@@ -285,6 +301,8 @@ class Agent:
                     "Use function tools when they help. "
                     "Show concise, user-visible reasoning steps, but do not reveal "
                     "hidden chain-of-thought. "
+                    "When writing files, use simple relative filenames; the agent "
+                    "will place them in the current run's artifacts directory. "
                     "Return a short step result with any useful findings."
                 ),
             },
@@ -562,23 +580,58 @@ class Agent:
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Execute a registered Python tool and record the result in memory."""
         tool = self.available_tools.get(name)
+        requested_arguments = dict(arguments)
+        effective_arguments = dict(arguments)
         if tool is None:
             result: Any = {"error": f"Unknown tool: {name}"}
         else:
             try:
-                result = tool(**arguments)
+                effective_arguments = self._scope_tool_arguments(name, arguments)
+                result = tool(**effective_arguments)
             except Exception as exc:  # Keep the agent alive on tool errors.
                 result = {"error": str(exc)}
 
-        self.memory["tool_calls"].append(
-            {
-                "tool": name,
-                "arguments": arguments,
-                "result": result,
-                "timestamp": self._now(),
-            }
-        )
+        record = {
+            "tool": name,
+            "arguments": requested_arguments,
+            "result": result,
+            "timestamp": self._now(),
+        }
+        if effective_arguments != requested_arguments:
+            record["effective_arguments"] = effective_arguments
+
+        self.memory["tool_calls"].append(record)
         return result
+
+    def _scope_tool_arguments(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Route model-created files into the active run artifact directory."""
+        if name != "write_file" or self.run_artifacts_path is None:
+            return dict(arguments)
+
+        requested_path = str(arguments.get("path") or "").strip()
+        artifact_path = self._artifact_relative_path(requested_path)
+        scoped_arguments = dict(arguments)
+        scoped_arguments["path"] = str(self.run_artifacts_path / artifact_path)
+        return scoped_arguments
+
+    @staticmethod
+    def _artifact_relative_path(path: str) -> Path:
+        """Validate a model-requested artifact path before scoping it."""
+        artifact_path = Path(path)
+        if not path or artifact_path.is_absolute():
+            raise ValueError("write_file path must be a non-empty relative path.")
+
+        clean_parts = [
+            part for part in artifact_path.parts if part not in ("", ".")
+        ]
+        if not clean_parts or any(part == ".." for part in clean_parts):
+            raise ValueError("write_file path cannot contain '..'.")
+
+        return Path(*clean_parts)
 
     def _parse_plan(self, content: str) -> list[str]:
         """Parse the model's JSON plan, with a fallback for plain text."""
@@ -674,12 +727,54 @@ class Agent:
         self.memory["reasoning_steps"].append(entry)
         print(f"[reasoning] {note}")
 
+    def _prepare_run_history(self) -> None:
+        """Create per-run archive paths for the current goal."""
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        self.run_id = timestamp
+        run_dir = self.run_history_dir / self.run_id
+        self.run_memory_path = run_dir / "memory.json"
+        self.run_report_path = run_dir / "report.md"
+        self.run_artifacts_path = run_dir / "artifacts"
+        self.memory["run_id"] = self.run_id
+        self.memory["history_paths"] = {
+            "memory": str(self.run_memory_path),
+            "report": str(self.run_report_path),
+            "artifacts": str(self.run_artifacts_path),
+            "goal_history": str(self.goal_history_path),
+        }
+
+    def _append_goal_history_event(self, event: str) -> None:
+        """Append a one-line JSON event for the current run."""
+        entry = {
+            "event": event,
+            "run_id": self.run_id,
+            "goal": self.memory["goal"],
+            "started_at": self.memory["started_at"],
+            "completed_at": self.memory["completed_at"],
+            "memory_path": (
+                str(self.run_memory_path) if self.run_memory_path is not None else ""
+            ),
+            "report_path": (
+                str(self.run_report_path) if self.run_report_path is not None else ""
+            ),
+            "artifacts_path": (
+                str(self.run_artifacts_path)
+                if self.run_artifacts_path is not None
+                else ""
+            ),
+            "timestamp": self._now(),
+        }
+        self.goal_history_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.goal_history_path.open("a", encoding="utf-8") as history_file:
+            history_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     def _save_memory(self) -> None:
         """Persist progress after each meaningful action."""
-        self.memory_path.write_text(
-            json.dumps(self.memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        memory_json = json.dumps(self.memory, indent=2, ensure_ascii=False)
+        self.memory_path.write_text(memory_json, encoding="utf-8")
+        if self.run_memory_path is not None:
+            self.run_memory_path.parent.mkdir(parents=True, exist_ok=True)
+            self.run_memory_path.write_text(memory_json, encoding="utf-8")
 
     def _record_rate_limit_failure(
         self,

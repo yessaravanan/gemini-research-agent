@@ -20,7 +20,7 @@ Suggested improvements:
 
 `Agent` handles provider setup, prompts, planning, execution, tool routing, memory persistence, retry handling, and report formatting in one class.
 
-Evidence: [agent.py](../agent.py#L138-L698).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L138-L698).
 
 Suggested improvements:
 
@@ -31,7 +31,7 @@ Suggested improvements:
 
 Prompts are hardcoded inside methods.
 
-Evidence: [agent.py](../agent.py#L241-L331).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L241-L331).
 
 Suggested improvements:
 
@@ -44,7 +44,7 @@ Suggested improvements:
 
 Memory is directly represented as a dictionary and written with `Path.write_text()`.
 
-Evidence: [agent.py](../agent.py#L148-L158), [agent.py](../agent.py#L576-L581).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L148-L158), [agent.py](../gemini_research_agent/agent.py#L576-L581).
 
 Suggested improvements:
 
@@ -56,7 +56,7 @@ Suggested improvements:
 
 `web_search` hardcodes Tavily and Brave Search behavior.
 
-Evidence: [tools/web_search.py](../tools/web_search.py#L29-L90).
+Evidence: [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L29-L90).
 
 Suggested improvements:
 
@@ -68,7 +68,7 @@ Suggested improvements:
 
 Tool schemas and runtime mappings are separate structures that must stay manually aligned.
 
-Evidence: schemas in [agent.py](../agent.py#L46-L135), runtime mapping in [agent.py](../agent.py#L170-L175).
+Evidence: schemas in [agent.py](../gemini_research_agent/agent.py#L46-L135), runtime mapping in [agent.py](../gemini_research_agent/agent.py#L170-L175).
 
 Suggested improvements:
 
@@ -79,21 +79,20 @@ Suggested improvements:
 
 ### Tool-Driven File Writes
 
-The model can request `write_file` for any path under the workspace. Path traversal outside the workspace is blocked, but overwriting important workspace files is still possible.
+The model can request `write_file`; the agent scopes those writes into `runs/<run_id>/artifacts/` before calling the file tool. Path traversal outside the workspace is blocked. Remaining risk is mostly around overwrite behavior inside the artifacts directory and accidental exposure of generated files.
 
-Evidence: path safety in [tools/file_tools.py](../tools/file_tools.py#L11-L16), write behavior in [tools/file_tools.py](../tools/file_tools.py#L25-L30).
+Evidence: artifact scoping in [agent.py](../gemini_research_agent/agent.py), path safety in [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L11-L16), write behavior in [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L25-L30).
 
 Suggested improvements:
 
-- Restrict write targets to an output directory unless explicitly approved.
-- Add overwrite protection for source files.
+- Add overwrite protection or versioned filenames for artifacts.
 - Log file diff summaries for tool writes.
 
 ### Tool Error Strings May Expose Local Paths
 
 Tool exceptions are stored as `{"error": str(exc)}`.
 
-Evidence: [agent.py](../agent.py#L474-L483).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L474-L483).
 
 Suggested improvements:
 
@@ -102,39 +101,40 @@ Suggested improvements:
 
 ### Generated Memory May Contain Sensitive Content
 
-`memory.json` stores goals, tool call arguments, tool results, and final answers.
+`runs/latest/memory.json` stores goals, tool call arguments, tool results, and final answers.
 
-Evidence: [agent.py](../agent.py#L148-L158), [agent.py](../agent.py#L474-L493).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L148-L158), [agent.py](../gemini_research_agent/agent.py#L474-L493).
 
 Suggested improvements:
 
-- Keep `memory.json` ignored by git; already configured in [.gitignore](../.gitignore#L5).
+- Keep `runs/latest/memory.json` ignored by git; already configured in [.gitignore](../.gitignore#L5).
 - Add redaction for secrets in tool results.
 - Avoid allowing `read_file` to read `.env`.
 
 ## Scalability Issues
 
-### Single-Run Local Files
+### Local File History Has No Concurrency Control
 
-The agent writes to fixed default files: `memory.json` and `report.md`.
+The agent writes latest-run files (`runs/latest/memory.json`, `runs/latest/report.md`) and archives every run under `runs/<run_id>/` with `runs/goal_history.jsonl` and per-run artifacts. This preserves local history, but it is still plain filesystem storage.
 
-Evidence: [agent.py](../agent.py#L141-L147).
+Evidence: [agent.py](../gemini_research_agent/agent.py).
 
 Impact:
 
-- Concurrent runs can overwrite each other.
-- Historical runs are not retained unless files are renamed externally.
+- Concurrent runs can still race when writing latest-run files or appending the JSONL index.
+- There is no query API, locking, compaction, retention policy, or database-backed index.
 
 Suggested improvements:
 
-- Use run IDs and write to `runs/<timestamp>/memory.json` and `runs/<timestamp>/report.md`.
-- Add a configurable output directory.
+- Add file locking around `runs/latest/memory.json`, `runs/latest/report.md`, and `runs/goal_history.jsonl`.
+- Add a retention/cleanup policy for `runs/`.
+- Move long-term run history to SQLite if querying/filtering becomes important.
 
 ### Synchronous Network Calls
 
 Gemini calls, web search, and retries are synchronous.
 
-Evidence: direct SDK calls and `time.sleep()` retry handling ([agent.py](../agent.py#L426-L470)).
+Evidence: direct SDK calls and `time.sleep()` retry handling ([agent.py](../gemini_research_agent/agent.py#L426-L470)).
 
 Suggested improvements:
 
@@ -145,13 +145,13 @@ Suggested improvements:
 
 Search now depends on Tavily and Brave API authentication, quotas, and availability.
 
-Evidence: API keys and provider calls are handled in `tools/web_search.py` ([tools/web_search.py](../tools/web_search.py#L93-L204)).
+Evidence: API keys and provider calls are handled in `tools/web_search.py` ([tools/web_search.py](../gemini_research_agent/tools/web_search.py#L93-L204)).
 
 Suggested improvements:
 
 - Add quota-aware retry and backoff for search APIs.
 - Add provider-specific smoke tests.
-- Preserve structured failure details in `memory.json`.
+- Preserve structured failure details in `runs/latest/memory.json`.
 
 ## Documentation Gaps
 
@@ -170,7 +170,7 @@ Suggested improvements:
 
 Configuration is checked when `Agent()` is constructed, after the CLI has already prompted for user input.
 
-Evidence: `main()` asks for goal before `Agent()` construction ([main.py](../main.py#L6-L14)).
+Evidence: `main()` asks for goal before `Agent()` construction ([main.py](../gemini_research_agent/main.py#L6-L14)).
 
 Suggested improvement:
 
@@ -180,7 +180,7 @@ Suggested improvement:
 
 The code now uses Google GenAI native function calling, but it does not run a startup smoke test to verify that the configured `GEMINI_MODEL` supports the expected tool behavior.
 
-Evidence: model configuration is read during `Agent()` construction, while tool-calling is first exercised during plan-step execution ([agent.py](../agent.py)).
+Evidence: model configuration is read during `Agent()` construction, while tool-calling is first exercised during plan-step execution ([agent.py](../gemini_research_agent/agent.py)).
 
 Suggested improvements:
 
@@ -190,8 +190,8 @@ Suggested improvements:
 ## Suggested Priorities
 
 1. Add tests around memory, tools, retries, and plan parsing.
-2. Protect `write_file` from overwriting source files.
-3. Move generated outputs into per-run directories.
+2. Add overwrite protection or versioned filenames for generated artifacts.
+3. Protect `read_file` from reading sensitive local files such as `.env`.
 4. Introduce a unified tool registry abstraction.
 5. Add search API quota handling and provider smoke tests.
 6. Add configuration validation and clearer startup diagnostics.

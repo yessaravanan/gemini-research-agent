@@ -5,7 +5,7 @@
 This project does not expose a network API. The APIs documented here are:
 
 - Internal Python functions/classes.
-- Model-visible tool schemas.
+- Model-visible tool functions.
 - External HTTP/API integrations used by the runtime.
 
 ## Internal Python APIs
@@ -20,11 +20,11 @@ Signature:
 def main() -> None
 ```
 
-Evidence: [main.py](../main.py#L6-L23).
+Evidence: [main.py](../gemini_research_agent/main.py#L6-L23).
 
 ### `Agent.__init__(memory_path="memory.json", report_path="report.md")`
 
-Purpose: initialize runtime paths, memory structure, Gemini provider, and local tools.
+Purpose: initialize runtime paths, run-history paths, memory structure, Gemini provider, and local tools.
 
 Inputs:
 
@@ -35,7 +35,7 @@ Raises:
 
 - `RuntimeError` if `GEMINI_API_KEY` or `GEMINI_MODEL` is missing.
 
-Evidence: [agent.py](../agent.py#L141-L192).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L141-L192).
 
 ### `Agent.run(goal: str) -> str`
 
@@ -51,11 +51,15 @@ Output:
 
 Side effects:
 
-- writes `memory.json`.
-- writes `report.md`.
+- writes `runs/latest/memory.json`.
+- writes `runs/latest/report.md`.
+- writes archived `runs/<run_id>/memory.json`.
+- writes archived `runs/<run_id>/report.md`.
+- writes model-created files under `runs/<run_id>/artifacts/`.
+- appends `started` and `completed` events to `runs/goal_history.jsonl`.
 - prints plan and reasoning messages to stdout.
 
-Evidence: [agent.py](../agent.py#L194-L239).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L194-L239).
 
 ### `Agent.create_plan(goal: str) -> list[str]`
 
@@ -66,32 +70,32 @@ Failure behavior:
 - If the model request fails, returns a built-in fallback plan.
 - If JSON parsing fails, falls back to line parsing, then a final static plan.
 
-Evidence: [agent.py](../agent.py#L241-L269), [agent.py](../agent.py#L495-L518).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L241-L269), [agent.py](../gemini_research_agent/agent.py#L495-L518).
 
 ### `Agent.execute_step(goal, plan, step, search_results) -> str`
 
 Purpose: execute one plan step with context and optional model-requested tools.
 
-Evidence: [agent.py](../agent.py#L271-L301).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L271-L301).
 
 ### `Agent.create_final_answer(goal, plan, search_results, step_results) -> str`
 
 Purpose: synthesize final Markdown answer using prior outputs.
 
-Evidence: [agent.py](../agent.py#L303-L331).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L303-L331).
 
 ## Tool APIs
 
 ### Model-Visible Tool Functions
 
-`_build_model_tools()` exposes four Python function tools to Gemini:
+`_build_model_tools()` exposes four native Gemini function declarations:
 
 - `read_file`
 - `write_file`
 - `list_files`
 - `web_search`
 
-Evidence: [agent.py](../agent.py).
+Evidence: [agent.py](../gemini_research_agent/agent.py).
 
 ### `read_file(path: str) -> dict[str, str]`
 
@@ -116,7 +120,7 @@ Security:
 
 - Path must remain under the process workspace root.
 
-Evidence: [tools/file_tools.py](../tools/file_tools.py#L11-L22).
+Evidence: [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L11-L22).
 
 ### `write_file(path: str, content: str) -> dict[str, str]`
 
@@ -133,7 +137,7 @@ Response:
 
 ```json
 {
-  "path": "relative/path.txt",
+  "path": "runs/<run_id>/artifacts/relative/path.txt",
   "status": "written"
 }
 ```
@@ -142,8 +146,10 @@ Security:
 
 - Path must remain under the process workspace root.
 - Parent directories are created automatically.
+- Model-requested `write_file` paths are rewritten under the active run's `artifacts/` directory before the file tool executes.
+- Empty paths, absolute paths, and paths containing `..` are rejected before writing.
 
-Evidence: [tools/file_tools.py](../tools/file_tools.py#L25-L30).
+Evidence: [agent.py](../gemini_research_agent/agent.py), [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L25-L30).
 
 ### `list_files(path: str = ".", recursive: bool = False) -> dict[str, list[str]]`
 
@@ -171,7 +177,7 @@ Errors:
 - `NotADirectoryError` if path is not a directory.
 - `ValueError` if path escapes workspace.
 
-Evidence: [tools/file_tools.py](../tools/file_tools.py#L33-L48).
+Evidence: [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py#L33-L48).
 
 ### `web_search(query: str, max_results: int = 5) -> dict`
 
@@ -231,7 +237,7 @@ Behavior:
 - Returns normalized `title`, `url`, and `snippet` entries.
 - Returns structured provider attempts when all providers fail.
 
-Evidence: [tools/web_search.py](../tools/web_search.py#L29-L58), [tools/web_search.py](../tools/web_search.py#L61-L90).
+Evidence: [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L29-L58), [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L61-L90).
 
 ## External APIs
 
@@ -245,7 +251,7 @@ Model:
 
 - `GEMINI_MODEL` is read from environment and passed as the `model` argument to `client.models.generate_content(...)`.
 
-Evidence: [agent.py](../agent.py).
+Evidence: [agent.py](../gemini_research_agent/agent.py).
 
 Request shape used by `_chat()`:
 
@@ -260,7 +266,7 @@ client.models.generate_content(
 )
 ```
 
-Evidence: [agent.py](../agent.py).
+Evidence: [agent.py](../gemini_research_agent/agent.py).
 
 Request shape used by `_chat_with_tools()`:
 
@@ -276,7 +282,7 @@ client.models.generate_content(
 )
 ```
 
-Evidence: [agent.py](../agent.py).
+Evidence: [agent.py](../gemini_research_agent/agent.py).
 
 Response handling:
 
@@ -285,7 +291,7 @@ Response handling:
 - The agent executes mapped Python tools with `_execute_tool()`.
 - The agent appends native `Part.from_function_response(...)` parts and continues the loop.
 
-Evidence: [agent.py](../agent.py).
+Evidence: [agent.py](../gemini_research_agent/agent.py).
 
 ### Tavily Search API
 
@@ -318,7 +324,7 @@ Response handling:
 - Maps `title`, `url`, and `content` to the normalized result format.
 - Preserves Tavily `response_time` and `request_id` when present.
 
-Evidence: [tools/web_search.py](../tools/web_search.py#L93-L147).
+Evidence: [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L93-L147).
 
 ### Brave Search API
 
@@ -350,7 +356,7 @@ Response handling:
 - Maps `title`, `url`, and `description` or `extra_snippets` to the normalized result format.
 - Preserves Brave `query` context when present.
 
-Evidence: [tools/web_search.py](../tools/web_search.py#L150-L204).
+Evidence: [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L150-L204).
 
 ## Error Responses and Authentication Failures
 
@@ -361,4 +367,4 @@ Model request failures are converted to sanitized messages in `_model_error_mess
 - Other HTTP status -> status-specific error.
 - Unknown exception -> class-name-only message.
 
-Evidence: [agent.py](../agent.py#L631-L646).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L631-L646).

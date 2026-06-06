@@ -9,16 +9,21 @@ sequenceDiagram
     participant Agent
     participant Gemini
     participant Tools
-    participant Memory as memory.json
-    participant Report as report.md
+    participant Memory as runs/latest/memory.json
+    participant Archive as runs/run_id
+    participant Artifacts as runs/run_id/artifacts
+    participant History as runs/goal_history.jsonl
+    participant Report as runs/latest/report.md
 
-    User->>Main: python3 main.py
+    User->>Main: python3 -m gemini_research_agent.main
     Main->>User: Prompt for goal
     User->>Main: Enter goal
     Main->>Agent: Agent()
     Agent->>Agent: Load .env and build Gemini provider
     Main->>Agent: run(goal)
+    Agent->>History: Append started event
     Agent->>Memory: Save initial goal and started_at
+    Agent->>Archive: Save archived memory
     Agent->>Gemini: Create plan
     Gemini-->>Agent: Plan content
     Agent->>Memory: Save plan
@@ -28,29 +33,39 @@ sequenceDiagram
     loop Each plan step
         Agent->>Gemini: Execute current step
         alt Gemini requests tools
-            Gemini-->>Agent: tool_calls
+            Gemini-->>Agent: native function calls
+            opt Tool is write_file
+                Agent->>Agent: Scope path to current run artifacts
+            end
             Agent->>Tools: Execute tool
+            opt Tool created file
+                Tools->>Artifacts: Write artifact file
+            end
             Tools-->>Agent: Tool result
             Agent->>Gemini: Tool result message
         else Gemini returns content
             Gemini-->>Agent: Step result
         end
         Agent->>Memory: Save step result
+        Agent->>Archive: Save archived memory
     end
     Agent->>Gemini: Create final answer
     Gemini-->>Agent: Final answer
     Agent->>Report: Write report.md from finalized memory
+    Agent->>Archive: Write archived report.md
     Agent->>Memory: Save completed state
+    Agent->>Archive: Save completed memory.json
+    Agent->>History: Append completed event
     Agent-->>Main: final_answer
     Main-->>User: Print final answer and file locations
 ```
 
 Evidence:
 
-- CLI prompt and agent call: [main.py](../main.py#L6-L19)
-- Provider construction: [agent.py](../agent.py#L177-L192)
-- Main run sequence: [agent.py](../agent.py#L194-L239)
-- Tool loop: [agent.py](../agent.py#L347-L424)
+- CLI prompt and agent call: [main.py](../gemini_research_agent/main.py#L6-L19)
+- Provider construction: [agent.py](../gemini_research_agent/agent.py#L177-L192)
+- Main run sequence: [agent.py](../gemini_research_agent/agent.py#L194-L239)
+- Tool loop: [agent.py](../gemini_research_agent/agent.py#L347-L424)
 
 ## Workflow 2: Agent Construction
 
@@ -79,10 +94,10 @@ sequenceDiagram
 
 Evidence:
 
-- `.env` loading: [agent.py](../agent.py#L27-L31)
-- Required provider variables and client construction: [agent.py](../agent.py#L177-L190)
-- Missing configuration error: [agent.py](../agent.py#L160-L165)
-- Tool registry: [agent.py](../agent.py#L170-L175)
+- `.env` loading: [agent.py](../gemini_research_agent/agent.py#L27-L31)
+- Required provider variables and client construction: [agent.py](../gemini_research_agent/agent.py#L177-L190)
+- Missing configuration error: [agent.py](../gemini_research_agent/agent.py#L160-L165)
+- Tool registry: [agent.py](../gemini_research_agent/agent.py#L170-L175)
 
 ## Workflow 3: Plan Creation
 
@@ -104,7 +119,7 @@ sequenceDiagram
     Agent->>Memory: Save plan
 ```
 
-Evidence: [agent.py](../agent.py#L241-L269), [agent.py](../agent.py#L495-L518).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L241-L269), [agent.py](../gemini_research_agent/agent.py#L495-L518).
 
 ## Workflow 4: Tool Calling
 
@@ -118,6 +133,9 @@ sequenceDiagram
     Agent->>Gemini: generate_content with function declarations
     alt Gemini requests a tool
         Gemini-->>Agent: Function call with signed model content
+        opt Tool is write_file
+            Agent->>Agent: Rewrite path under runs/run_id/artifacts
+        end
         Agent->>Tool: _execute_tool(name, arguments)
         Agent->>Memory: Append tool call result
         Agent->>Gemini: Native function_response part
@@ -129,8 +147,8 @@ sequenceDiagram
 
 Evidence:
 
-- Gemini function declarations and tool execution: [agent.py](../agent.py)
-- Tool execution and memory record: [agent.py](../agent.py)
+- Gemini function declarations and tool execution: [agent.py](../gemini_research_agent/agent.py)
+- Tool execution and memory record: [agent.py](../gemini_research_agent/agent.py)
 
 ## Workflow 5: Web Search
 
@@ -147,24 +165,31 @@ flowchart TD
     H -- no --> J[Return combined provider error object]
 ```
 
-Evidence: [tools/web_search.py](../tools/web_search.py#L29-L58), [tools/web_search.py](../tools/web_search.py#L61-L90).
+Evidence: [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L29-L58), [tools/web_search.py](../gemini_research_agent/tools/web_search.py#L61-L90).
 
 ## Workflow 6: Memory and Report Persistence
 
 ```mermaid
 flowchart LR
     A[Agent state changes] --> B[_save_memory]
-    B --> C[(memory.json)]
+    B --> C[(runs/latest/memory.json)]
+    B --> G[(runs/run_id/memory.json)]
+    A --> T[write_file tool execution]
+    T --> K[(runs/run_id/artifacts)]
     A --> D[_format_report_from_memory]
-    D --> E[write_file tool]
-    E --> F[(report.md)]
+    D --> E[Path.write_text]
+    E --> F[(runs/latest/report.md)]
+    E --> H[(runs/run_id/report.md)]
+    A --> I[_append_goal_history_event]
+    I --> J[(runs/goal_history.jsonl)]
 ```
 
 Evidence:
 
-- Memory write: [agent.py](../agent.py#L576-L581)
-- Report formatting: [agent.py](../agent.py#L520-L568)
-- Final report save via `write_file`: [agent.py](../agent.py#L226-L237)
+- Memory write and archive write: [agent.py](../gemini_research_agent/agent.py)
+- Artifact writes through scoped `write_file` tool execution: [agent.py](../gemini_research_agent/agent.py), [tools/file_tools.py](../gemini_research_agent/tools/file_tools.py)
+- Report formatting: [agent.py](../gemini_research_agent/agent.py#L520-L568)
+- Final report save and goal history events: [agent.py](../gemini_research_agent/agent.py)
 
 ## Workflow 7: Rate Limit Handling
 
@@ -174,7 +199,7 @@ sequenceDiagram
     participant Gemini
     participant Memory
 
-    Agent->>Gemini: Chat completion
+    Agent->>Gemini: generate_content
     alt Success
         Gemini-->>Agent: Response
     else HTTP 429
@@ -190,4 +215,4 @@ sequenceDiagram
     end
 ```
 
-Evidence: [agent.py](../agent.py#L426-L470), [agent.py](../agent.py#L583-L629).
+Evidence: [agent.py](../gemini_research_agent/agent.py#L426-L470), [agent.py](../gemini_research_agent/agent.py#L583-L629).
